@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "id": "mult_4x4",
+      "topic": "numbers",
+      "subtopic": "multiplication",
+      "difficulty": "easy",
+      "question_text": "What is four times four?",
+      "type": "mcq",
+      "choices": ["16", "18", "15", "12"],
+      "answer": "16",
+      "hints": ["Skip count by 4.", "Think of 4 groups of 4."],
+      "tags": ["table:4", "factor:4", "k-2"]
+    },
+    {
+      "id": "shape_circle_01",
+      "topic": "shapes",
+      "subtopic": "identify",
+      "difficulty": "easy",
+      "question_text": "Look at the picture. What shape is this?",
+      "type": "open",
+      "answer": "circle",
+      "hints": ["It’s round and has no corners."],
+      "media": { "image": { "url": "/static/img/circle.svg", "alt": "a round circle" } },
+      "tags": ["k-2"]
+    },
+    {
+      "id": "flowers_list_5",
+      "topic": "vocab",
+      "subtopic": "flowers",
+      "difficulty": "easy",
+      "question_text": "Can you tell me five flower names? Keep listing them!",
+      "type": "list",
+      "list_spec": { "required": 5, "category": "flowers" },
+      "hints": ["Think of flowers you see in gardens."],
+      "tags": ["k-2"]
+    }
+  ]
+}

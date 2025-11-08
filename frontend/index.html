@@ -1,0 +1,306 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Jigyāsa — Live (V4G, PCM)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{color-scheme:light dark}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7fb;margin:0;padding:2rem}
+    .app{max-width:780px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    button{padding:10px 16px;border-radius:10px;border:0;cursor:pointer}
+    .primary{background:#2563eb;color:#fff}
+    .ghost{background:#f1f5f9}
+    .hint{color:#6b7280}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>Jigyāsa — Live (V4G, PCM)</h1>
+    <div class="row">
+      <button class="primary" onclick="toggleLive()"><span id="liveBtn">Start Live</span></button>
+      <button class="ghost" onclick="commitTurn()">Commit Turn</button>
+    </div>
+    <div id="status" class="hint" style="margin-top:8px;"></div>
+  </div>
+
+<script>
+/** =========================================
+ *  Config
+ *  ======================================= */
+const API = "http://localhost:8000";
+
+/** =========================================
+ *  UI helpers
+ *  ======================================= */
+function setStatus(s){ document.getElementById("status").innerText = s; }
+function setLiveBtn(on){ document.getElementById("liveBtn").innerText = on ? "Stop Live" : "Start Live"; }
+
+/** =========================================
+ *  Globals
+ *  ======================================= */
+let audioCtx = null;
+let micStream = null;
+let workletNode = null;
+let ws = null;
+let playing = false;
+let SRC_RATE = 24000; // will be updated via "pcm_meta" from server
+
+/** =========================================
+ *  Float32 → Int16 PCM (LE)
+ *  ======================================= */
+function floatTo16LEPCM(float32Array){
+  const out = new Int16Array(float32Array.length);
+  for (let i=0;i<float32Array.length;i++){
+    let s = Math.max(-1, Math.min(1, float32Array[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out.buffer; // ArrayBuffer
+}
+
+/** =========================================
+ *  PLAYBACK SCHEDULER (smooth, no gaps)
+ *  - Schedules each chunk slightly in the future
+ *  - Catches up if we fall behind
+ *  ======================================= */
+const playState = { t: 0 }; // running "wall clock" in AudioContext time
+
+function schedulePCMChunk(buf){
+  if (!audioCtx) return;
+
+  // Convert Int16LE PCM → Float32
+  const i16 = new Int16Array(buf);
+  const f32 = new Float32Array(i16.length);
+  for (let i=0;i<i16.length;i++){ f32[i] = i16[i] / 0x8000; }
+
+  // Build an AudioBuffer at the server's declared sample rate
+  const abuf = audioCtx.createBuffer(1, f32.length, SRC_RATE);
+  abuf.copyToChannel(f32, 0, 0);
+
+  // Create a source & schedule start
+  const src = audioCtx.createBufferSource();
+  src.buffer = abuf;
+  src.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  const lead = 0.05; // 50ms safety headroom
+  if (!playState.t || playState.t < now + lead) {
+    playState.t = now + lead;
+  }
+  src.start(playState.t);
+
+  // Advance clock by the duration of this buffer
+  playState.t += abuf.duration;
+}
+
+/** =========================================
+ *  High-quality mic downsample (48k→16k) Worklet
+ *  - 9-tap FIR low-pass to reduce aliasing
+ *  - Decimate by 3 if input is 48k
+ *  - Fallback to simple decimation for other rates
+ *  ======================================= */
+const workletCode = `
+class PCM16kProcessor extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this._inRate = sampleRate;   // typically 48000 on most systems
+    this._outRate = 16000;
+    this._buf = new Float32Array(0);
+    this._chunk = 2048;          // process in manageable blocks
+
+    // Symmetric 9-tap FIR (Hamming-like), ~7kHz cutoff @ 48k
+    this._fir = new Float32Array([
+      0.035,  0.095,  0.160,  0.210,  0.230,  0.210,  0.160,  0.095,  0.035
+    ]);
+  }
+
+  _convolveMono(x) {
+    const n = x.length, m = this._fir.length;
+    const y = new Float32Array(n);
+    const h = this._fir;
+    const r = (m - 1) >> 1; // 4 for m=9
+
+    for (let i = 0; i < n; i++) {
+      let acc = 0.0;
+      for (let k = -r; k <= r; k++) {
+        const xi = i + k;
+        const xval = (xi < 0 || xi >= n) ? 0.0 : x[xi];
+        acc += xval * h[k + r];
+      }
+      y[i] = acc;
+    }
+    return y;
+  }
+
+  _downsample48kTo16k(filtered){
+    // pick every 3rd sample
+    const outLen = Math.floor(filtered.length / 3);
+    const out = new Float32Array(outLen);
+    let j = 0;
+    for (let i = 0; i < outLen; i++) {
+      out[i] = filtered[j];
+      j += 3;
+    }
+    return out;
+  }
+
+  process(inputs){
+    const input = inputs[0];
+    if (!input || !input[0]) return true;
+
+    const inBlock = input[0]; // mono Float32
+    // Append to buffer
+    const merged = new Float32Array(this._buf.length + inBlock.length);
+    merged.set(this._buf, 0); merged.set(inBlock, this._buf.length);
+    this._buf = merged;
+
+    // Process in chunks → emit ~_chunk @16k per post
+    while (this._buf.length >= this._chunk) {
+      const frame = this._buf.subarray(0, this._chunk);
+      this._buf = this._buf.subarray(this._chunk);
+
+      let out16;
+      if (this._inRate === 48000) {
+        const filtered = this._convolveMono(frame);
+        out16 = this._downsample48kTo16k(filtered);
+      } else {
+        // Fallback: simple decimation for non-48k input
+        const ratio = this._inRate / 16000;
+        const outLen = Math.floor(frame.length / ratio);
+        out16 = new Float32Array(outLen);
+        let idxOut = 0, idxIn = 0;
+        while (idxOut < outLen){
+          out16[idxOut++] = frame[Math.floor(idxIn)];
+          idxIn += ratio;
+        }
+      }
+
+      this.port.postMessage(out16, [out16.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pcm16k-processor', PCM16kProcessor);
+`;
+
+/** =========================================
+ *  Controls
+ *  ======================================= */
+function commitTurn(){
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({type:"commit"}));
+  setStatus("Committed this turn.");
+}
+
+/** =========================================
+ *  Start / Stop Live
+ *  ======================================= */
+async function startLive(){
+  if (playing) return;
+  setStatus("Starting live…");
+  playing = true;
+  setLiveBtn(true);
+
+  // Create a single AudioContext for the session (48k default output)
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 48000});
+
+  // Mic stream (enable acoustic echo cancellation to avoid “double voice”)
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1
+    }
+  });
+
+  // Route mic → Worklet (never to speakers!)
+  const src = audioCtx.createMediaStreamSource(micStream);
+  // Load worklet
+  const blob = new Blob([workletCode], {type: "application/javascript"});
+  const url = URL.createObjectURL(blob);
+  try { await audioCtx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm16k-processor');
+  src.connect(workletNode);
+
+  // WS
+  ws = new WebSocket(`${API.replace('http','ws')}/live/ws`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    // small playback clock reset
+    playState.t = 0;
+    ws.send(JSON.stringify({type:"hello", mime:"audio/pcm;rate=16000"}));
+    setStatus("Live connected. The tutor will lead the session.");
+  };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string"){
+      try{
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "error") setStatus("Live error: " + msg.error);
+        if (msg.type === "ack")   setStatus("ACK " + (msg.mime || ""));
+        if (msg.type === "ready") setStatus("Live ready.");
+        if (msg.type === "pcm_meta" && msg.rate){
+          const r = Number(msg.rate);
+          if (r > 0) SRC_RATE = r;
+          setStatus(`Live ready. Playback rate: ${(SRC_RATE/1000).toFixed(2)} kHz`);
+        }
+      }catch(_){}
+      return;
+    }
+    // Binary = server TTS audio (Int16LE PCM @ SRC_RATE)
+    schedulePCMChunk(ev.data);
+  };
+
+  ws.onclose = () => { setStatus("Live closed."); };
+  ws.onerror  = () => { setStatus("Live error."); };
+
+  // Pipe mic → worklet → WS
+  workletNode.port.onmessage = (e) => {
+    if (!ws || ws.readyState !== 1) return;
+    const f32 = e.data;                // Float32 16k
+    const pcm = floatTo16LEPCM(f32);   // ArrayBuffer Int16
+    ws.send(pcm);
+  };
+}
+
+function stopLive(){
+  setLiveBtn(false);
+
+  // Stop sending mic frames
+  if (workletNode){
+    try { workletNode.port.onmessage = null; } catch (_){}
+    try { workletNode.disconnect(); } catch (_){}
+    workletNode = null;
+  }
+
+  // Stop all mic tracks
+  if (micStream){
+    try { micStream.getTracks().forEach(t => t.stop()); } catch(_){}
+    micStream = null;
+  }
+
+  // Tell backend we're done, then close WS
+  if (ws && ws.readyState === 1){
+    try { ws.send(JSON.stringify({type:"done"})); } catch (_){}
+  }
+  try { ws && ws.close(); } catch(_){}
+  ws = null;
+
+  // Reset playback clock so next session starts clean
+  playState.t = 0;
+
+  setStatus("Live stopped.");
+  playing = false;
+}
+
+function toggleLive(){
+  if (playing) stopLive(); else startLive();
+}
+
+window.addEventListener("beforeunload", stopLive);
+</script>
+</body>
+</html>
