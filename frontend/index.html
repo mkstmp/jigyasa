@@ -4,178 +4,173 @@
   <meta charset="utf-8" />
   <title>Jigyāsa — Live (V4G, PCM)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script>
+    // Fallback profile if not provided via URL ?session_id=...
+    window.JIGYASA_PROFILE_ID = 'kid_demo_001';
+  </script>
   <style>
     :root{color-scheme:light dark}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7fb;margin:0;padding:2rem}
-    .app{max-width:780px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}
+    .app{max-width:980px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}
     .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
     button{padding:10px 16px;border-radius:10px;border:0;cursor:pointer}
     .primary{background:#2563eb;color:#fff}
     .ghost{background:#f1f5f9}
     .hint{color:#6b7280}
+    .grid{display:grid;gap:16px}
+    .twocol{grid-template-columns:1.3fr .9fr}
+    @media (max-width: 900px){.twocol{grid-template-columns:1fr}}
+    .card{border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+    .card h3{margin:0 0 8px 0;font-size:18px}
+    .muted{color:#6b7280}
+    /* Q&A */
+    #questionText{font-size:20px;line-height:1.35;margin:0}
+    #meta{font-size:12px}
+    #options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+    @media (min-width:700px){#options{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    .opt{padding:12px 14px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;text-align:center;font-weight:600}
+    .opt:hover{background:#eef2ff}
+    .opt[aria-pressed="true"]{outline:2px solid #2563eb;background:#eff6ff}
+    /* Transcript */
+    #transcript{height:220px;overflow:auto;background:#f9fafb;border-radius:12px;padding:12px;border:1px solid #e5e7eb}
+    .line{margin:0 0 6px}
   </style>
 </head>
 <body>
   <div class="app">
-    <h1>Jigyāsa — Live (V4G, PCM)</h1>
-    <div class="row">
-      <button class="primary" onclick="toggleLive()"><span id="liveBtn">Start Live</span></button>
-      <button class="ghost" onclick="commitTurn()">Commit Turn</button>
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <div class="row">
+        <button id="liveBtn" class="primary">Start Live</button>
+        <button id="commitBtn" class="ghost">Commit Turn</button>
+      </div>
+      <div id="status" class="hint">Idle.</div>
     </div>
-    <div id="status" class="hint" style="margin-top:8px;"></div>
+
+    <div class="grid twocol">
+      <!-- Question & Options Card -->
+      <div class="card" id="qa">
+        <h3>Question</h3>
+        <div id="meta" class="muted">—</div>
+        <p id="questionText" class="muted">No question yet. Say “Hello” to start.</p>
+        <div id="options" aria-label="answer choices"></div>
+        <div class="row" style="margin-top:10px">
+          <button id="clearQBtn" class="ghost">Clear</button>
+        </div>
+      </div>
+
+      <!-- Transcript / Events Card -->
+      <div class="card">
+        <h3>Transcript</h3>
+        <div id="transcript" aria-live="polite"></div>
+      </div>
+    </div>
   </div>
 
 <script>
-/** =========================================
- *  Config
- *  ======================================= */
-const API = "http://localhost:8000";
+/** =========================
+ *  Config / helpers
+ *  ======================= */
+function getParam(name){ try{ return new URL(location.href).searchParams.get(name) }catch(_){ return null } }
+const PROFILE_ID = getParam('session_id') || (window.JIGYASA_PROFILE_ID || 'kid_demo_001');
+const WS_URL = (location.protocol==='https:'?'wss':'ws')+'://'+(location.hostname==='localhost'?'localhost:8000':location.host)+
+               `/live/ws?session_id=${encodeURIComponent(PROFILE_ID)}`;
 
-/** =========================================
- *  UI helpers
- *  ======================================= */
 function setStatus(s){ document.getElementById("status").innerText = s; }
-function setLiveBtn(on){ document.getElementById("liveBtn").innerText = on ? "Stop Live" : "Start Live"; }
+function logLine(text, cls='sys'){
+  const p = document.createElement('p'); p.className='line '+cls; p.textContent=text;
+  document.getElementById('transcript').appendChild(p);
+  const t = document.getElementById('transcript'); t.scrollTop = t.scrollHeight;
+}
 
-/** =========================================
+/** =========================
  *  Globals
- *  ======================================= */
-let audioCtx = null;
-let micStream = null;
-let workletNode = null;
-let ws = null;
-let playing = false;
-let SRC_RATE = 24000; // will be updated via "pcm_meta" from server
+ *  ======================= */
+let audioCtx=null, micStream=null, workletNode=null, ws=null, playing=false;
+let SRC_RATE = 24000; // model output rate (from server pcm_meta)
+let outGain = null;   // master output (helps echo by lowering volume)
+let currentQuestion=null;
 
-/** =========================================
+/** =========================
  *  Float32 → Int16 PCM (LE)
- *  ======================================= */
+ *  ======================= */
 function floatTo16LEPCM(float32Array){
   const out = new Int16Array(float32Array.length);
   for (let i=0;i<float32Array.length;i++){
     let s = Math.max(-1, Math.min(1, float32Array[i]));
     out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
   }
-  return out.buffer; // ArrayBuffer
+  return out.buffer;
 }
 
-/** =========================================
- *  PLAYBACK SCHEDULER (smooth, no gaps)
- *  - Schedules each chunk slightly in the future
- *  - Catches up if we fall behind
- *  ======================================= */
-const playState = { t: 0 }; // running "wall clock" in AudioContext time
-
+/** =========================
+ *  PLAYBACK SCHEDULER (smooth)
+ *  ======================= */
+const playState = { t: 0 };
 function schedulePCMChunk(buf){
   if (!audioCtx) return;
-
-  // Convert Int16LE PCM → Float32
   const i16 = new Int16Array(buf);
   const f32 = new Float32Array(i16.length);
   for (let i=0;i<i16.length;i++){ f32[i] = i16[i] / 0x8000; }
-
-  // Build an AudioBuffer at the server's declared sample rate
   const abuf = audioCtx.createBuffer(1, f32.length, SRC_RATE);
   abuf.copyToChannel(f32, 0, 0);
-
-  // Create a source & schedule start
   const src = audioCtx.createBufferSource();
   src.buffer = abuf;
-  src.connect(audioCtx.destination);
-
-  const now = audioCtx.currentTime;
-  const lead = 0.05; // 50ms safety headroom
-  if (!playState.t || playState.t < now + lead) {
-    playState.t = now + lead;
-  }
+  src.connect(outGain || audioCtx.destination); // go through master gain
+  const now = audioCtx.currentTime, lead = 0.05;
+  if (!playState.t || playState.t < now + lead) { playState.t = now + lead; }
   src.start(playState.t);
-
-  // Advance clock by the duration of this buffer
   playState.t += abuf.duration;
 }
 
-/** =========================================
- *  High-quality mic downsample (48k→16k) Worklet
- *  - 9-tap FIR low-pass to reduce aliasing
- *  - Decimate by 3 if input is 48k
- *  - Fallback to simple decimation for other rates
- *  ======================================= */
+/** =========================
+ *  Mic Worklet (48k → 16k with FIR)
+ *  ======================= */
 const workletCode = `
 class PCM16kProcessor extends AudioWorkletProcessor {
   constructor(){
     super();
-    this._inRate = sampleRate;   // typically 48000 on most systems
-    this._outRate = 16000;
+    this._inRate = sampleRate;   // 48000 typical
     this._buf = new Float32Array(0);
-    this._chunk = 2048;          // process in manageable blocks
-
-    // Symmetric 9-tap FIR (Hamming-like), ~7kHz cutoff @ 48k
-    this._fir = new Float32Array([
-      0.035,  0.095,  0.160,  0.210,  0.230,  0.210,  0.160,  0.095,  0.035
-    ]);
+    this._chunk = 2048;
+    // 9-tap FIR (light low-pass)
+    this._fir = new Float32Array([0.035,0.095,0.160,0.210,0.230,0.210,0.160,0.095,0.035]);
   }
-
-  _convolveMono(x) {
-    const n = x.length, m = this._fir.length;
-    const y = new Float32Array(n);
-    const h = this._fir;
-    const r = (m - 1) >> 1; // 4 for m=9
-
-    for (let i = 0; i < n; i++) {
-      let acc = 0.0;
-      for (let k = -r; k <= r; k++) {
-        const xi = i + k;
-        const xval = (xi < 0 || xi >= n) ? 0.0 : x[xi];
-        acc += xval * h[k + r];
+  _convolve(x){
+    const n=x.length, m=this._fir.length, r=(m-1)>>1, y=new Float32Array(n);
+    for(let i=0;i<n;i++){
+      let acc=0.0;
+      for(let k=-r;k<=r;k++){
+        const xi=i+k; const xv=(xi<0||xi>=n)?0.0:x[xi];
+        acc += xv * this._fir[k+r];
       }
-      y[i] = acc;
+      y[i]=acc;
     }
     return y;
   }
-
-  _downsample48kTo16k(filtered){
-    // pick every 3rd sample
-    const outLen = Math.floor(filtered.length / 3);
+  _down48to16(filtered){
+    const outLen = Math.floor(filtered.length/3);
     const out = new Float32Array(outLen);
-    let j = 0;
-    for (let i = 0; i < outLen; i++) {
-      out[i] = filtered[j];
-      j += 3;
-    }
+    let j=0; for(let i=0;i<outLen;i++){ out[i]=filtered[j]; j+=3; }
     return out;
   }
-
   process(inputs){
-    const input = inputs[0];
-    if (!input || !input[0]) return true;
-
-    const inBlock = input[0]; // mono Float32
-    // Append to buffer
-    const merged = new Float32Array(this._buf.length + inBlock.length);
-    merged.set(this._buf, 0); merged.set(inBlock, this._buf.length);
-    this._buf = merged;
-
-    // Process in chunks → emit ~_chunk @16k per post
-    while (this._buf.length >= this._chunk) {
-      const frame = this._buf.subarray(0, this._chunk);
-      this._buf = this._buf.subarray(this._chunk);
-
+    const input=inputs[0]; if(!input||!input[0]) return true;
+    const inBlock=input[0];
+    const merged=new Float32Array(this._buf.length+inBlock.length);
+    merged.set(this._buf,0); merged.set(inBlock,this._buf.length);
+    this._buf=merged;
+    while(this._buf.length>=this._chunk){
+      const frame=this._buf.subarray(0,this._chunk);
+      this._buf=this._buf.subarray(this._chunk);
       let out16;
-      if (this._inRate === 48000) {
-        const filtered = this._convolveMono(frame);
-        out16 = this._downsample48kTo16k(filtered);
-      } else {
-        // Fallback: simple decimation for non-48k input
-        const ratio = this._inRate / 16000;
-        const outLen = Math.floor(frame.length / ratio);
-        out16 = new Float32Array(outLen);
-        let idxOut = 0, idxIn = 0;
-        while (idxOut < outLen){
-          out16[idxOut++] = frame[Math.floor(idxIn)];
-          idxIn += ratio;
-        }
+      if(this._inRate===48000){ out16=this._down48to16(this._convolve(frame)); }
+      else {
+        const ratio=this._inRate/16000;
+        const outLen=Math.floor(frame.length/ratio);
+        out16=new Float32Array(outLen);
+        let oi=0, ii=0;
+        while(oi<outLen){ out16[oi++]=frame[Math.floor(ii)]; ii+=ratio; }
       }
-
       this.port.postMessage(out16, [out16.buffer]);
     }
     return true;
@@ -184,28 +179,29 @@ class PCM16kProcessor extends AudioWorkletProcessor {
 registerProcessor('pcm16k-processor', PCM16kProcessor);
 `;
 
-/** =========================================
- *  Controls
- *  ======================================= */
-function commitTurn(){
-  if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({type:"commit"}));
-  setStatus("Committed this turn.");
-}
-
-/** =========================================
- *  Start / Stop Live
- *  ======================================= */
+/** =========================
+ *  Start / Stop / Commit
+ *  ======================= */
 async function startLive(){
   if (playing) return;
-  setStatus("Starting live…");
   playing = true;
-  setLiveBtn(true);
+  setStatus("Starting…");
+  document.getElementById('liveBtn').innerText = 'Stop Live';
 
-  // Create a single AudioContext for the session (48k default output)
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 48000});
+  // Create AudioContext with low latency; set up master gain (echo tame)
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)({
+      sampleRate: 48000,
+      latencyHint: 'interactive'
+    });
+  }
+  if (!outGain){
+    outGain = audioCtx.createGain();
+    outGain.gain.value = 0.6;           // reduce speaker volume to help AEC
+    outGain.connect(audioCtx.destination);
+  }
 
-  // Mic stream (enable acoustic echo cancellation to avoid “double voice”)
+  // Mic (AEC/NS/AGC on)
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -215,92 +211,132 @@ async function startLive(){
     }
   });
 
-  // Route mic → Worklet (never to speakers!)
+  // Mic → worklet (never to speakers)
   const src = audioCtx.createMediaStreamSource(micStream);
-  // Load worklet
-  const blob = new Blob([workletCode], {type: "application/javascript"});
+  const blob = new Blob([workletCode], {type:'application/javascript'});
   const url = URL.createObjectURL(blob);
   try { await audioCtx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
   workletNode = new AudioWorkletNode(audioCtx, 'pcm16k-processor');
   src.connect(workletNode);
 
   // WS
-  ws = new WebSocket(`${API.replace('http','ws')}/live/ws`);
-  ws.binaryType = "arraybuffer";
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
-    // small playback clock reset
+  ws.onopen = ()=>{
     playState.t = 0;
-    ws.send(JSON.stringify({type:"hello", mime:"audio/pcm;rate=16000"}));
-    setStatus("Live connected. The tutor will lead the session.");
+    // Tell backend mic format (16 kHz PCM)
+    ws.send(JSON.stringify({type:'hello', mime:'audio/pcm;rate=16000'}));
+    setStatus('Live connected.');
+    logLine('[ws] open');
   };
 
-  ws.onmessage = (ev) => {
-    if (typeof ev.data === "string"){
+  ws.onmessage = (ev)=>{
+    if (typeof ev.data === 'string'){
       try{
         const msg = JSON.parse(ev.data);
-        if (msg.type === "error") setStatus("Live error: " + msg.error);
-        if (msg.type === "ack")   setStatus("ACK " + (msg.mime || ""));
-        if (msg.type === "ready") setStatus("Live ready.");
-        if (msg.type === "pcm_meta" && msg.rate){
-          const r = Number(msg.rate);
-          if (r > 0) SRC_RATE = r;
-          setStatus(`Live ready. Playback rate: ${(SRC_RATE/1000).toFixed(2)} kHz`);
+        if (msg.type==='ready') setStatus('Live ready.');
+        if (msg.type==='session' && msg.session_id) logLine(`[session] ${msg.session_id}`);
+        if (msg.type==='pcm_meta' && msg.rate){ SRC_RATE=Number(msg.rate)||SRC_RATE; }
+        if (msg.type==='text'){
+          logLine((msg.role==='user'?'You':'Model')+': '+msg.content, msg.role==='user'?'u':'m');
+        }
+        if (msg.type==='tool_result'){
+          if (msg.name==='get_question' && msg.output) renderQuestion(msg.output);
+          if (msg.name==='update_answer' && msg.output) handleAnswerResult(msg.output);
         }
       }catch(_){}
       return;
     }
-    // Binary = server TTS audio (Int16LE PCM @ SRC_RATE)
+    // Binary = model PCM at SRC_RATE
     schedulePCMChunk(ev.data);
   };
 
-  ws.onclose = () => { setStatus("Live closed."); };
-  ws.onerror  = () => { setStatus("Live error."); };
+  ws.onclose = ()=>{ setStatus('Live closed.'); logLine('[ws] close'); };
+  ws.onerror = ()=>{ setStatus('Live error.'); logLine('[ws] error'); };
 
   // Pipe mic → worklet → WS
-  workletNode.port.onmessage = (e) => {
-    if (!ws || ws.readyState !== 1) return;
-    const f32 = e.data;                // Float32 16k
-    const pcm = floatTo16LEPCM(f32);   // ArrayBuffer Int16
+  workletNode.port.onmessage = (e)=>{
+    if(!ws || ws.readyState!==1) return;
+    const f32 = e.data;              // Float32 16k
+    const pcm = floatTo16LEPCM(f32); // ArrayBuffer Int16
     ws.send(pcm);
   };
 }
 
 function stopLive(){
-  setLiveBtn(false);
-
-  // Stop sending mic frames
-  if (workletNode){
-    try { workletNode.port.onmessage = null; } catch (_){}
-    try { workletNode.disconnect(); } catch (_){}
-    workletNode = null;
-  }
-
-  // Stop all mic tracks
-  if (micStream){
-    try { micStream.getTracks().forEach(t => t.stop()); } catch(_){}
-    micStream = null;
-  }
-
-  // Tell backend we're done, then close WS
-  if (ws && ws.readyState === 1){
-    try { ws.send(JSON.stringify({type:"done"})); } catch (_){}
-  }
-  try { ws && ws.close(); } catch(_){}
-  ws = null;
-
-  // Reset playback clock so next session starts clean
+  document.getElementById('liveBtn').innerText = 'Start Live';
+  if (workletNode){ try{ workletNode.port.onmessage=null; workletNode.disconnect(); }catch{} workletNode=null; }
+  if (micStream){ try{ micStream.getTracks().forEach(t=>t.stop()); }catch{} micStream=null; }
+  if (ws && ws.readyState===1){ try{ ws.send(JSON.stringify({type:'done'})); }catch{} }
+  try{ ws && ws.close(); }catch{} ws=null;
   playState.t = 0;
-
-  setStatus("Live stopped.");
-  playing = false;
+  setStatus('Live stopped.');
+  playing=false;
 }
 
-function toggleLive(){
-  if (playing) stopLive(); else startLive();
+function toggleLive(){ playing? stopLive() : startLive(); }
+function commitTurn(){ if(ws && ws.readyState===1) ws.send(JSON.stringify({type:'commit'})); }
+
+/** =========================
+ *  Q&A UI
+ *  ======================= */
+const qText=document.getElementById('questionText');
+const qMeta=document.getElementById('meta');
+const optionsEl=document.getElementById('options');
+document.getElementById('liveBtn').addEventListener('click', toggleLive);
+document.getElementById('commitBtn').addEventListener('click', commitTurn);
+document.getElementById('clearQBtn').addEventListener('click', ()=>{
+  currentQuestion=null; qText.textContent='No question yet.'; qMeta.textContent='—'; optionsEl.innerHTML='';
+});
+
+function renderQuestion(q){
+  currentQuestion = q;
+  qText.textContent = q.question_text || '—';
+  qMeta.textContent = formatMeta(q);
+  const opts = Array.isArray(q.options) ? q.options : (Array.isArray(q.choices) ? q.choices : []);
+  optionsEl.innerHTML = '';
+  if (opts.length){
+    opts.forEach((opt, idx)=>{
+      const b = document.createElement('button');
+      b.className='opt'; b.type='button';
+      b.textContent = (typeof opt==='object' && 'text' in opt) ? opt.text : String(opt);
+      b.setAttribute('aria-pressed','false');
+      b.addEventListener('click', ()=> chooseOption(idx, opt));
+      optionsEl.appendChild(b);
+    });
+  } else {
+    const p=document.createElement('p'); p.className='muted'; p.textContent='(No options provided — open question)';
+    optionsEl.appendChild(p);
+  }
+}
+function chooseOption(idx, opt){
+  [...optionsEl.querySelectorAll('.opt')].forEach((el,i)=> el.setAttribute('aria-pressed', i===idx ? 'true':'false'));
+  const payload = {
+    question_id: currentQuestion?.id,
+    choice_index: idx,
+    choice: (typeof opt==='object' && 'text' in opt)? opt.text : String(opt)
+  };
+  // Optional: forward as a tool envelope (if your backend supports UI-triggered tools)
+  if (ws && ws.readyState===1){
+    ws.send(JSON.stringify({type:'tool', name:'update_answer', input: payload}));
+  }
+  logLine('You chose: '+payload.choice, 'u');
+}
+function handleAnswerResult(res){
+  if (typeof res.correct === 'boolean'){
+    logLine(res.correct ? '✅ Correct!' : '❌ Try again', 'm');
+  }
+  if (res.feedback){ logLine('Feedback: '+res.feedback, 'm'); }
+  if (res.next_question){ renderQuestion(res.next_question); }
+}
+function formatMeta(q){
+  const bits=[]; if(q.topic)bits.push(q.topic); if(q.subtopic)bits.push(q.subtopic); if(q.difficulty)bits.push(q.difficulty);
+  if(q.grade)bits.push(q.grade); if(q.subject)bits.push(q.subject);
+  return bits.length? bits.join(' • ') : '—';
 }
 
-window.addEventListener("beforeunload", stopLive);
+window.addEventListener('beforeunload', ()=>{ if(playing) stopLive(); });
 </script>
 </body>
 </html>

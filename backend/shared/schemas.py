@@ -25,6 +25,9 @@ class ListSpec(BaseModel):
 # ---------- Core content item ----------
 class ContentItem(BaseModel):
     id: str
+    grade: Optional[str] = None
+    subject: Optional[str] = None
+
     topic: str
     subtopic: Optional[str] = None
     difficulty: str

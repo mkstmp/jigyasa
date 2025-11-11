@@ -3,7 +3,7 @@ import json, os, random
 from typing import List, Optional, Dict, Any
 
 # Load content.json at import
-DATA_PATH = os.path.join(os.path.dirname(__file__), "content.json")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "content_1_math.json")
 
 
 def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:

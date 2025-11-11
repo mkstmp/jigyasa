@@ -1,5 +1,7 @@
 # backend/main.py
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from __future__ import annotations
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
@@ -8,7 +10,9 @@ import os, json, asyncio, contextlib, logging
 
 from backend.shared.schemas import EventRecord, ProfileState
 from backend.shared import config
+from backend.agents import logger_agent
 from backend.live.gemini_live import GeminiLiveBridge, LiveBridgeError
+from backend.agents.tool_router import get_current_question_for_session
 
 # -----------------------------------------------------------------------------
 # App setup
@@ -80,22 +84,25 @@ def profile_state(profile_id: str):
     )
 
 # -----------------------------------------------------------------------------
+# Read-only sync: must supply session_id (profile_id)
+# -----------------------------------------------------------------------------
+@app.get("/live/current_question")
+def http_get_current_question(session_id: str = Query(..., description="ProfileId acts as SessionId")):
+    q = get_current_question_for_session(session_id)
+    if not q:
+        raise HTTPException(status_code=404, detail="no current question")
+    q = {k: v for k, v in q.items() if k != "_answer"}
+    return {"question": q}
+
+# -----------------------------------------------------------------------------
 # Gemini LIVE WebSocket bridge (PCM path)
 # -----------------------------------------------------------------------------
 @app.websocket("/live/ws")
 async def live_ws(ws: WebSocket):
-    """
-    WS protocol (browser <-> server):
-      - Client sends {"type":"hello","mime":"audio/pcm;rate=16000"} once connected
-      - Then streams binary mic frames (PCM16 @16k)
-      - Server forwards to Gemini Live; streams PCM24k back (binary)
-      - {"type":"commit"} marks end-of-turn, {"type":"done"} closes
-
-    NOTE: No /curriculum/next. The model/tooling now drives question flow end-to-end.
-    """
     await ws.accept()
+    sid = (ws.query_params.get("session_id") or "kid_demo_001").strip()
     peer = f"{ws.client.host}:{ws.client.port if ws.client else 'unknown'}"
-    log.info("WS accepted from %s", peer)
+    log.info("WS accepted from %s (session_id=%s)", peer, sid)
 
     async def safe_send_json(payload: dict):
         if ws.application_state != WebSocketState.CONNECTED:
@@ -117,96 +124,58 @@ async def live_ws(ws: WebSocket):
         return
 
     bridge = GeminiLiveBridge()
-    downstream_task = None
+    # BIND PUSH SENDERS (JSON + AUDIO) — this is the only downstream path
+    bridge.bind_ui_sender(safe_send_json)
+    bridge.bind_audio_sender(safe_send_bytes)
 
     try:
-        # Start Gemini live
-        try:
-            await bridge.start()
-            await safe_send_json({"type": "ready"})
-            await safe_send_json({"type": "pcm_meta", "rate": bridge.out_rate_hz})
-            log.info("Gemini Live bridge started for %s", peer)
-        except LiveBridgeError as e:
-            await safe_send_json({"type": "error", "error": str(e)})
-            with contextlib.suppress(Exception):
-                await ws.close()
-            log.error("Bridge init failed (%s): %s", peer, e)
-            return
-        except Exception as e:
-            await safe_send_json({"type": "error", "error": "INIT_FAILED"})
-            with contextlib.suppress(Exception):
-                await ws.close()
-            log.exception("Bridge unexpected init error (%s): %s", peer, e)
-            return
+        bridge.set_session(sid)   # set first to avoid races
+        await bridge.start()
+        await safe_send_json({"type": "session", "session_id": sid})
+        await safe_send_json({"type": "ready"})
+        await safe_send_json({"type": "pcm_meta", "rate": bridge.out_rate_hz})
 
-        # Model audio -> browser (PCM24k)
-        async def pump_downstream():
-            try:
-                async for audio_chunk in bridge.receive_audio():
-                    await safe_send_bytes(audio_chunk)
-                    log.debug("WS %s <- %d bytes (pcm24k)", peer, len(audio_chunk))
-            except Exception:
-                # Quietly exit on disconnect
-                pass
-
-        downstream_task = asyncio.create_task(pump_downstream())
-
-        # Browser mic + control
+        # Browser mic/control loop (NO downstream pump here)
         mime = "audio/pcm;rate=16000"
         while True:
             msg = await ws.receive()
 
-            # client closed
             if msg.get("type") == "websocket.disconnect":
                 log.info("WS disconnected from %s", peer)
                 break
 
-            # control (JSON)
             if isinstance(msg.get("text"), str):
-                txt = msg["text"]
-                log.debug("WS %s text: %s", peer, txt)
-                if txt.startswith("{"):
+                try:
+                    obj = json.loads(msg["text"])
+                except Exception:
+                    continue
+                t = obj.get("type")
+                if t == "hello":
+                    mime = obj.get("mime") or mime
+                    await safe_send_json({"type": "ack", "mime": mime})
+                elif t == "commit":
                     with contextlib.suppress(Exception):
-                        obj = json.loads(txt)
-                        t = obj.get("type")
-                        if t == "hello":
-                            if obj.get("mime"):
-                                mime = obj["mime"]
-                            await safe_send_json({"type": "ack", "mime": mime})
-                            log.info("WS %s hello ack (mime=%s)", peer, mime)
-                        elif t == "commit":
-                            with contextlib.suppress(Exception):
-                                await bridge.commit_segment()
-                            log.info("WS %s commit sent to LIVE", peer)
-                        elif t == "done":
-                            log.info("WS %s done received", peer)
-                            break
-                        # Optional: ignore/allow other control types (e.g., "say"/"prime") if your FE sends them
+                        await bridge.commit_segment()
+                elif t == "done":
+                    break
+                elif t == "tool":
+                    # Optional pass-through (if you allow FE to initiate tools)
+                    # The live model should orchestrate; feel free to ignore.
+                    pass
                 continue
 
-            # binary = mic audio (PCM16 @16k)
             data = msg.get("bytes")
             if data:
                 with contextlib.suppress(Exception):
                     await bridge.send_audio(data, mime)
-                    log.debug("WS %s -> %d bytes (pcm16)", peer, len(data))
 
     except WebSocketDisconnect:
         log.info("WS %s disconnected", peer)
     except Exception as e:
         log.exception("WS %s error: %s", peer, e)
     finally:
-        # Close Gemini bridge
         with contextlib.suppress(Exception):
             await bridge.close()
-
-        # Cancel downstream pump quietly
-        if downstream_task:
-            downstream_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(downstream_task)
-
         with contextlib.suppress(Exception):
             await ws.close()
-
         log.info("WS %s closed", peer)
