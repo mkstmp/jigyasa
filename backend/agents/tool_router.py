@@ -1,9 +1,9 @@
 # backend/agents/tool_router.py
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, List, Set, Union
 from dataclasses import dataclass, field
-import time, random
+from typing import Dict, Any, Optional, List, Set
+import time
 
 from backend.content import library
 from backend.agents import logger_agent
@@ -13,51 +13,61 @@ class ToolError(Exception):
     pass
 
 
+# -------------------------------
+# In-memory session store (demo)
+# -------------------------------
 @dataclass
 class Attempt:
     question_id: str
     choice_index: Optional[int] = None
     choice_text: Optional[str] = None
-    correct: Optional[bool] = None
-    at: float = field(default_factory=lambda: time.time())
-    attempt_id: Optional[str] = None
+    correct: bool = False
+    attempt_id: str = ""
 
 
 @dataclass
 class SessionState:
-    current_question: Optional[Dict[str, Any]] = None  # ONLY mutated by get_question()
-    question_seq: int = 0
-    processed_attempt_ids: Set[str] = field(default_factory=set)
+    session_id: str
+    current_question: Optional[Dict[str, Any]] = None
     last_answer: Optional[Attempt] = None
     progress_log: List[Attempt] = field(default_factory=list)
+    processed_attempt_ids: Set[str] = field(default_factory=set)
+    seq: int = 0  # increments on each get_question
 
 
 _SESSIONS: Dict[str, SessionState] = {}
 
 
 def _get_session(session_id: str) -> SessionState:
-    if not session_id or not session_id.strip():
-        raise ToolError("session_id is required")
-    sid = session_id.strip()
-    sess = _SESSIONS.get(sid)
-    if not sess:
-        sess = SessionState()
-        _SESSIONS[sid] = sess
-    return sess
+    if not session_id:
+        raise ToolError("session_id required")
+    st = _SESSIONS.get(session_id)
+    if not st:
+        st = SessionState(session_id=session_id)
+        _SESSIONS[session_id] = st
+    return st
 
 
 def get_current_question_for_session(session_id: str) -> Optional[Dict[str, Any]]:
-    sess = _SESSIONS.get(session_id.strip())
-    return sess.current_question if sess else None
+    """Used by /live/current_question for the UI to poll; safe copy w/o answer."""
+    st = _SESSIONS.get(session_id)
+    if not st or not st.current_question:
+        return None
+    q = dict(st.current_question)
+    q.pop("_answer", None)
+    return q
 
 
+# -------------------------------
+# Tool Router
+# -------------------------------
 class ToolRouter:
     """
-    get_question: ONLY mutator of current_question (per session)
-    update_answer: logs/evaluates; NEVER mutates current_question
+    get_question: chooses next item from library (filtered) and updates the session's current_question.
+    update_answer: stateless; records/journals the answer. NO dependence on current_question.
     """
 
-    # ---- helpers -------------------------------------------------------------
+    # ---- helpers ----
     def _norm(self, s: Optional[str]) -> str:
         return (s or "").strip().lower()
 
@@ -88,43 +98,42 @@ class ToolRouter:
             or it.get("prompt_visual")
             or ""
         )
-        choices = list(it.get("choices") or [])
 
         payload: Dict[str, Any] = {
+            "id": it.get("id") or "",
             "question_id": it.get("id") or "",
-            "type": it.get("type") or "",
+            "type": it.get("type") or "open",
             "question_text": question_text,
-            "choices": choices,
+            "choices": list(it.get("choices") or []),
+            "options": list(it.get("choices") or []),  # FE compatibility
             "answer": it.get("answer"),
             "topic": it.get("topic") or "",
             "difficulty": it.get("difficulty") or "",
-            "prompt": question_text,          # deprecated, kept for safety
-
-            # UI + orchestration
-            "id": it.get("id") or "",
-            "options": [str(c) for c in choices],
+            "grade": it.get("grade") or "",
+            "subject": it.get("subject") or "",
+            "prompt": question_text,  # transitional; can remove later
             "seq": seq,
         }
+
         if it.get("type") == "list" and it.get("list_spec"):
             payload["list_spec"] = it.get("list_spec")
         return payload
 
-    # ---- public tools --------------------------------------------------------
+    # ---- tools ----
     def get_question(
         self,
         *,
         grade: str,
         subject: str,
         topic: str,
-        session_id: str,                    # MANDATORY
-        last_question_id: Optional[str] = None,
+        session_id: str,                      # mandatory
+        last_question_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        sess = _get_session(session_id)
-
         all_items: List[Dict[str, Any]] = library.ITEMS or []
         if not all_items:
             raise ToolError("No items in library")
 
+        # strict, then relax, then fallback
         items = self._filter_items(grade=grade, subject=subject, topic=topic)
         if not items:
             items = self._filter_items(grade=None, subject=None, topic=topic)
@@ -133,6 +142,7 @@ class ToolRouter:
         if not items:
             raise ToolError("No matching items")
 
+        # pick next after last_question_id (within the filtered list)
         if last_question_id:
             try:
                 idx = next(i for i, it in enumerate(items) if it.get("id") == last_question_id)
@@ -142,16 +152,21 @@ class ToolRouter:
         else:
             nxt = items[0]
 
-        sess.question_seq += 1
-        q_payload = self._to_question_payload(nxt, seq=sess.question_seq)
-        sess.current_question = q_payload  # <-- ONLY place we mutate live question
+        sess = _get_session(session_id)
+        sess.seq += 1
+
+        # decorate and store as current question
+        q_payload = self._to_question_payload(nxt, seq=sess.seq)
+        # keep canonical answer only server-side (omit from /live/current_question)
+        q_payload["_answer"] = nxt.get("answer")
+        sess.current_question = q_payload
 
         logger_agent.log_event({
             "type": "live_tool_get_question",
             "filters": {"grade": grade, "subject": subject, "topic": topic, "last_question_id": last_question_id},
             "chosen_id": nxt.get("id"),
             "session_id": session_id,
-            "seq": sess.question_seq,
+            "seq": sess.seq,
         })
         return q_payload
 
@@ -161,12 +176,15 @@ class ToolRouter:
         question_id: str,
         user_answer: str,
         is_correct: bool,
-        session_id: str,                    # MANDATORY
+        session_id: str,                    # mandatory
         attempt_id: Optional[str] = None,
         choice_index: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """
+        Stateless record of an answer. DO NOT depend on sess.current_question.
+        Only enforce idempotency via attempt_id.
+        """
         sess = _get_session(session_id)
-        cq = sess.current_question
 
         # Idempotency
         if attempt_id and attempt_id in sess.processed_attempt_ids:
@@ -174,40 +192,30 @@ class ToolRouter:
         if attempt_id:
             sess.processed_attempt_ids.add(attempt_id)
 
-        if not cq or str(question_id) != str(cq.get("id")):
-            logger_agent.log_event({
-                "type": "live_tool_update_answer_stale",
-                "question_id": question_id,
-                "user_answer": user_answer,
-                "is_correct": is_correct,
-                "session_id": session_id,
-                "current_question_id": cq.get("id") if cq else None,
-            })
-            return {"error": "stale_or_unknown_question", "current_question": cq}
-
+        # Journal attempt
         att = Attempt(
             question_id=str(question_id),
             choice_index=choice_index,
             choice_text=str(user_answer),
             correct=bool(is_correct),
-            attempt_id=attempt_id or f"auto-{cq.get('seq')}",
+            attempt_id=attempt_id or f"ts-{int(time.time())}",
         )
         sess.last_answer = att
         sess.progress_log.append(att)
 
+        # Observability
         logger_agent.log_event({
             "type": "live_tool_update_answer",
             "question_id": question_id,
             "user_answer": user_answer,
             "is_correct": bool(is_correct),
             "session_id": session_id,
-            "seq": cq.get("seq"),
         })
 
-        # DO NOT mutate sess.current_question here.
+        # Do NOT mutate sess.current_question here.
+        # Do NOT return current_question here.
         return {
             "ok": True,
             "correct": bool(is_correct),
             "feedback": "Great job!" if is_correct else "Not quite—try again.",
-            "question": cq,
         }

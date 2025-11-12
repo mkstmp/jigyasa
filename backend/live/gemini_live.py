@@ -122,14 +122,26 @@ class GeminiLiveBridge:
         sys_text = (
             f"You are a friendly, patient tutor speaking with a young child named {self.kid['name']} "
             f"(age {self.kid['age']}, grade {self.kid['grade']}). "
-            f"Speak in {self.kid['language']} (Indian English). "
-            "ALWAYS use the available tools to fetch questions and record answers. "
-            "Do NOT invent questions yourself—call get_question first to obtain one. "
-            "Greet the child briefly, then call get_question with grade='KG', subject='Math', topic='Numbers'. "
-            "Ask one question at a time, listen, call update_answer with your judgement, and then move to the next. "
-            "Keep responses short, warm, and age-appropriate. Use audio only."
+            f"Speak in {self.kid['language']}. "
+
+            # HARD RULES — DO NOT DEVIATE
+            "You MUST use the available tools to drive the lesson. "
+            "Never invent or paraphrase questions. "
+            "Workflow:\n"
+            "1) Call get_question(grade, subject, topic). "
+            "2) Read the returned question VERBATIM from `question_text` (do not reword). "
+            "3) Listen to the child. Judge their answer. "
+            "4) Call update_answer(question_id, user_answer, is_correct). "
+            "5) Then call get_question again for the next one. "
+
+            # Audio behavior
+            "Keep responses short, warm, and age-appropriate. Speak in AUDIO only."
+
+            # Language Rule
+            "Stick to {self.kid['language']} language"
         )
         system_instruction = types.Content(role="system", parts=[types.Part(text=sys_text)])
+        
 
         try:
             live_config = types.LiveConnectConfig(
@@ -151,22 +163,7 @@ class GeminiLiveBridge:
 
         log.info("GeminiLiveBridge.start: live session established")
 
-        # Primer
-        grade = self.kid['grade']; subject = "Math"; topic = "Numbers"
-        try:
-            await self._session.send(
-                input=(
-                    f"Please greet the child briefly in Indian English and then call the tool "
-                    f"`get_question` with {{grade:'{grade}', subject:'{subject}', topic:'{topic}'}}. "
-                    f"Do not create your own question; use the tool result."
-                )
-            )
-            log.info("Primer sent: greet + get_question(%s/%s/%s)", grade, subject, topic)
-            # Small kick so the model starts immediately (prevents waiting for child audio)
-            await self._session.send(input="Hello!")
-            log.info("Kick sent: 'Hello!'")
-        except Exception as e:
-            log.warning("Primer/kick send failed: %s", e)
+        # No kick. Model will speak after first user audio or after a later end_of_turn.
 
         # Start background receiver
         self._recv_task = asyncio.create_task(self._pump_from_google())
@@ -188,7 +185,7 @@ class GeminiLiveBridge:
         )
         self._last_question_id = question.get("id")
 
-        # Mirror to UI for your transcript / question panel
+        # Mirror to UI
         await self._ui_emit({"type": "tool_result", "name": "get_question", "output": question})
         return question
 
@@ -213,19 +210,46 @@ class GeminiLiveBridge:
     # ------------ send tool result back to model ------------
     async def _send_tool_result(self, *, name: str, call_id: Optional[str], result_obj: Dict[str, Any]):
         """
-        Send a tool result back to the model using the correct method
-        from the stable Live API.
+        Send a tool result back to the model across SDK variants.
+
+        Prefer (new):  session.send_tool_response(function_responses=[FunctionResponse(...)])
+        Fallbacks:     session.send_realtime_input(function_responses=[...])
+                       session.send(function_responses=[...])
         """
         if not call_id:
             log.warning("Tool call (name=%s) had no call_id; cannot send result.", name)
             return
 
+        fr = types.FunctionResponse(name=name, id=call_id, response=result_obj)
+
+        # ---- Path A: new API (if present)
         try:
-            fr = types.FunctionResponse(name=name, id=call_id, response=result_obj)
-            await self._session.send_tool_response(function_responses=[fr])
-            log.info("Sent tool result via send_tool_response (call_id=%s)", call_id)
+            send_tool_resp = getattr(self._session, "send_tool_response", None)
+            if callable(send_tool_resp):
+                await send_tool_resp(function_responses=[fr])  # keyword-only
+                log.info("Sent tool result via send_tool_response (call_id=%s)", call_id)
+                return
         except Exception as e:
-            log.exception("send_tool_response failed (call_id=%s): %s", call_id, e)
+            log.debug("send_tool_response path failed: %s", e)
+
+        # ---- Path B: realtime input path (many builds support this)
+        try:
+            send_rt = getattr(self._session, "send_realtime_input", None)
+            if callable(send_rt):
+                await send_rt(function_responses=[fr])  # no 'input' required
+                log.info("Sent tool result via send_realtime_input(function_responses=...) (call_id=%s)", call_id)
+                return
+        except Exception as e:
+            log.debug("send_realtime_input(function_responses=...) failed: %s", e)
+
+        # ---- Path C: plain send() with function_responses kwarg (some builds)
+        try:
+            await self._session.send(function_responses=[fr])  # no 'input' kw required in many builds
+            log.info("Sent tool result via send(function_responses=[...]) (call_id=%s)", call_id)
+            return
+        except Exception as e:
+            log.exception("All tool-response paths failed (call_id=%s): %s", call_id, e)
+
 
     # ------------ live receive loop ------------
     async def _pump_from_google(self):
@@ -234,7 +258,7 @@ class GeminiLiveBridge:
             while True:
                 turn = self._session.receive()
                 async for response in turn:
-                    # 1) Audio frames (PCM16 @ 24kHz, mono) — push downstream once
+                    # 1) Audio frames (PCM16 @ 24kHz, mono)
                     if getattr(response, "data", None):
                         pcm_bytes = response.data
                         if self._audio_send:
@@ -257,10 +281,6 @@ class GeminiLiveBridge:
             log.info("GeminiLiveBridge._pump_from_google: receiver finished")
 
     async def _handle_tool_call(self, tool_call):
-        """
-        Parse FunctionCall(s) and dispatch to our tool router, then send the result
-        back using whatever tool-response path the SDK supports.
-        """
         calls = getattr(tool_call, "function_calls", None) or []
         for fc in calls:
             name = getattr(fc, "name", None)
@@ -302,7 +322,7 @@ class GeminiLiveBridge:
         if not self._session:
             return
         try:
-            await self._session.send(end_of_turn=True)
+            await self._session.send(input="", end_of_turn=True)  # include input="" for legacy builds
         except Exception:
             pass
 

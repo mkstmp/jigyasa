@@ -78,8 +78,7 @@ const WS_URL = (location.protocol==='https:'?'wss':'ws')+'://'+(location.hostnam
 function setStatus(s){ document.getElementById("status").innerText = s; }
 function logLine(text, cls='sys'){
   const p = document.createElement('p'); p.className='line '+cls; p.textContent=text;
-  document.getElementById('transcript').appendChild(p);
-  const t = document.getElementById('transcript'); t.scrollTop = t.scrollHeight;
+  const t = document.getElementById('transcript'); t.appendChild(p); t.scrollTop = t.scrollHeight;
 }
 
 /** =========================
