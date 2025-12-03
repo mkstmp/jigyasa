@@ -1,93 +1,113 @@
 # backend/content/library.py
-import json, os, random
+import json
+import os
+import random
 from typing import List, Optional, Dict, Any
 
-# Load content.json at import
-DATA_PATH = os.path.join(os.path.dirname(__file__), "content_1_math.json")
+# Path to your JSON file (adjust name if needed)
+DATA_PATH = os.path.join(os.path.dirname(__file__), "content_new.json")
 
 
-def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure forward-compatible fields exist and avoid brittle casing."""
-    it = dict(it)  # shallow copy
+def _load_items() -> List[Dict[str, Any]]:
+    """Load content items from JSON once at startup."""
+    if not os.path.exists(DATA_PATH):
+        print(f"[content] DATA_PATH not found: {DATA_PATH}")
+        return []
 
-    # Ensure question_text exists (prefer new field; fallback to legacy fields)
-    if not it.get("question_text"):
-        it["question_text"] = it.get("prompt_tts") or it.get("prompt_visual") or ""
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-    # Optional: default missing structural fields to keep downstream code simple
-    it.setdefault("type", "open")            # if missing, assume "open"
-    it.setdefault("topic", "")
-    it.setdefault("difficulty", "")
-    it.setdefault("subtopic", None)
-    it.setdefault("choices", [])
-    it.setdefault("answer", None)
-    # list_spec is passed through if present
+        # Support both:
+        #   { "items": [ ... ] }
+        # and
+        #   [ ... ]
+        if isinstance(data, dict) and "items" in data:
+            raw_items = data["items"]
+        else:
+            raw_items = data
 
-    return it
+        if isinstance(raw_items, list):
+            return raw_items
 
-
-def _load_items() -> List[dict]:
-    with open(DATA_PATH, "r") as f:
-        data = json.load(f)
-    # Accept either a top-level list OR {"items":[...]}
-    items = data["items"] if isinstance(data, dict) and "items" in data else data
-    return [_normalize_item(x) for x in items]
-
-
-ITEMS: List[dict] = _load_items()
+        print("[content] JSON format not recognized; expected list or {items:[...]}")
+        return []
+    except Exception as e:
+        print(f"[content] Error loading content library: {e}")
+        return []
 
 
-def _eq_ci(a: Optional[str], b: Optional[str]) -> bool:
-    """Case-insensitive equality (treat None/'' as equal only if both falsy)."""
-    if not a and not b:
-        return True
-    if a is None or b is None:
-        return False
-    return a.lower() == b.lower()
-
-
-def _filter_candidates(topic: Optional[str], difficulty: Optional[str], subtopic: Optional[str]) -> List[dict]:
-    cands = list(ITEMS)
-    if topic:
-        cands = [c for c in cands if _eq_ci(c.get("topic"), topic)]
-    if difficulty:
-        cands = [c for c in cands if _eq_ci(c.get("difficulty"), difficulty)]
-    if subtopic:
-        cands = [c for c in cands if _eq_ci(c.get("subtopic"), subtopic)]
-    return cands
+# Load once; ToolRouter uses this
+ITEMS: List[Dict[str, Any]] = _load_items()
 
 
 def fetch(
+    grade: Optional[str],
+    subject: Optional[str],
     topic: Optional[str],
-    difficulty: Optional[str],
-    subtopic: Optional[str],
-    exclude: Optional[List[str]] = None
-) -> Optional[dict]:
-    """Legacy fetch used by old endpoints; keep behavior but make it case-insensitive."""
-    exclude_set = set(exclude or [])
+    exclude_ids: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Optional helper: filter ITEMS in-memory. ToolRouter currently
+    does its own filtering; this is here for future use or scripts.
+    """
+    g = (grade or "").strip().lower()
+    s = (subject or "").strip().lower()
+    t = (topic or "").strip().lower()
 
-    # First pass: exact filters
-    cands = [c for c in _filter_candidates(topic, difficulty, subtopic) if c.get("id") not in exclude_set]
-    if cands:
-        return random.choice(cands)
+    exclude_set = set(exclude_ids or [])
 
-    # Relaxed: match topic only
-    if topic:
-        cands = [c for c in ITEMS if _eq_ci(c.get("topic"), topic) and c.get("id") not in exclude_set]
-        if cands:
-            return random.choice(cands)
+    candidates: List[Dict[str, Any]] = []
+    for item in ITEMS:
+        # Skip if excluded
+        if item.get("id") in exclude_set:
+            continue
 
-    # Last resort: ANY item not excluded
-    cands = [c for c in ITEMS if c.get("id") not in exclude_set]
-    if cands:
-        return random.choice(cands)
+        # Skip if explicitly inactive
+        if item.get("active") is False:
+            continue
 
-    return None
+        item_grade = (item.get("grade") or "").strip().lower()
+        item_subject = (item.get("subject") or "").strip().lower()
+        item_topic = (item.get("topic") or "").strip().lower()
 
+        # Topic: usually strict
+        if t and t != item_topic:
+            continue
 
-def get_by_id(item_id: str) -> Optional[dict]:
-    """Convenience helper for debug endpoints."""
-    for it in ITEMS:
-        if it.get("id") == item_id:
-            return it
+        # Subject: simple containment (e.g. "math" in "mathematics")
+        if s and s not in item_subject:
+            continue
+
+        # Grade: simple equality for now (we can relax later)
+        if g and g != item_grade:
+            continue
+
+        candidates.append(item)
+
+    if candidates:
+        return random.choice(candidates)
+
+    # Fallback: if strict grade match fails, relax grade but keep subject/topic
+    if t or s:
+        relaxed: List[Dict[str, Any]] = []
+        for item in ITEMS:
+            if item.get("id") in exclude_set:
+                continue
+            if item.get("active") is False:
+                continue
+
+            item_subject = (item.get("subject") or "").strip().lower()
+            item_topic = (item.get("topic") or "").strip().lower()
+
+            if t and t != item_topic:
+                continue
+            if s and s not in item_subject:
+                continue
+
+            relaxed.append(item)
+
+        if relaxed:
+            return random.choice(relaxed)
+
     return None
