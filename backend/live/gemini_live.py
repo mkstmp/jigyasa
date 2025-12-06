@@ -233,7 +233,8 @@ class GeminiLiveBridge:
             "       If the answer is wrong, incomplete, off-topic, 'I don't know', or silence,\n"
             "       you MUST set is_correct = false.\n"
             "5) Give very short spoken feedback (praise or gentle 'that's not right'),\n"
-            "   and then immediately call get_question() for the next question.\n\n"
+            "   and then immediately call get_question() for the next question.\n"
+            "6) Ignore the 'media' field in the tool output; it is for the visual display only.\n\n"
 
             "AUDIO STYLE:\n"
             "   - Use simple language and speak clearly.\n"
@@ -246,9 +247,11 @@ class GeminiLiveBridge:
             "  - Do NOT ask the child to “try again” on the same question.\n"
             "  - Do NOT repeat the same question or wait for another answer before calling `get_question`.\n"
             "  - Never call `update_answer` twice for the same question.\n"
+            "  - Ignore the 'media' field in the tool output; it is for the visual display only.\n"
+            "  - If the tool returns {"lesson_done": true}, purely say 'Great job, you finished the test!' and stop asking questions.\n"
 
 
-            "Note: Your are not a tutor, you are conducting test! Move to next question even if kid's response is wrong!"
+            "Note: You are not a tutor, you are conducting test! Move to next question even if kid's response is wrong!"
         )
 
         system_instruction = types.Content(
@@ -317,7 +320,8 @@ class GeminiLiveBridge:
             last_qid,
         )
 
-        question = self._tool_router.get_question(
+        # Ask the router for the next question
+        raw = self._tool_router.get_question(
             grade=grade,
             subject=subject,
             topic=topic,
@@ -327,13 +331,49 @@ class GeminiLiveBridge:
             profile_id=self.profile_id,
             user_email=self.parent_email,
         )
+
+        # Normalise to a plain dict
+        if raw is None:
+            question = {"lesson_done": True}
+        elif isinstance(raw, dict):
+            question = dict(raw)
+        else:
+            # pydantic model or similar
+            try:
+                question = raw.model_dump()
+            except AttributeError:
+                try:
+                    question = raw.dict()
+                except Exception:
+                    question = dict(raw)
+
+        # Ensure media field is in the shape the frontend expects:
+        #   { "image": { "url": "...", "alt": "" } }
+        media = question.get("media")
+        if media:
+            if isinstance(media, dict):
+                # legacy forms like {"url": "..."} or {"image_url": "...", "alt": "..."}
+                if "image" not in media and ("url" in media or "image_url" in media):
+                    url = media.get("url") or media.get("image_url")
+                    alt = media.get("alt") or ""
+                    media = {"image": {"url": url, "alt": alt}}
+            question["media"] = media
+
+        # Track the last question id (if any)
         self._last_question_id = question.get("id")
 
         # Mirror to UI
         await self._ui_emit(
-            {"type": "tool_result", "name": "get_question", "output": question}
+            {
+                "type": "tool_result",
+                "name": "get_question",
+                "output": question,
+            }
         )
+
+        # Return to the model as the tool result
         return question
+
 
     async def _tool_update_answer(self, args: dict):
         if not self.session_id:

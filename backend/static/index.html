@@ -72,15 +72,15 @@
       border-bottom: 1px solid #e5e7eb;
       background: #ffffff;
       font-size: 14px;
-      gap: 16px;
+      gap: 12px;
       flex-shrink: 0;
     }
 
     .header-left {
       display: flex;
       align-items: center;
-      gap: 8px;
-      min-width: 160px;
+      gap: 10px;
+      min-width: 140px;
     }
 
     .logo {
@@ -191,6 +191,24 @@
       text-decoration: none;
       font-weight: 600;
       font-size: 13px;
+    }
+
+    /* Hamburger (mobile only) */
+    .btn-hamburger {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      background: #f8fafc;
+      display: none;
+      place-items: center;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .btn-hamburger:active {
+      transform: scale(0.97);
     }
 
     /* ---------- Main app area ---------- */
@@ -319,6 +337,7 @@
     #view-setup {
       padding: 0;
       background: var(--bg-body);
+      position: relative;
     }
 
     .dashboard-shell {
@@ -330,15 +349,16 @@
       gap: 0;
     }
 
+    /* Softer, kid-friendlier left rail */
     .sidebar {
-      background: #020617;
+      background: #0f172a;
+      color: #e5e7eb;
       border-right: none;
       padding: 16px 12px;
       display: flex;
       flex-direction: column;
       gap: 16px;
       overflow-y: auto;
-      color: #e5e7eb;
     }
 
     .sidebar-section {
@@ -378,11 +398,12 @@
     .sidebar-kid-name {
       font-size: 15px;
       font-weight: 800;
+      color: #f9fafb;
     }
 
     .sidebar-kid-meta {
       font-size: 12px;
-      color: #9ca3af;
+      color: #cbd5f5;
     }
 
     .sidebar-switch-btn {
@@ -433,7 +454,7 @@
     }
 
     .sidebar-nav-item--active {
-      background: #0b57d0;
+      background: rgba(148, 163, 184, 0.22);
       color: #ffffff;
       font-weight: 700;
     }
@@ -746,14 +767,13 @@
     }
 
     .live-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px 0;         /* slimmer, no heavy bar feel */
-  border-bottom: none;         /* remove line */
-  font-size: 13px;
-}
-
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 16px 0;
+      border-bottom: none;
+      font-size: 13px;
+    }
 
     .live-lesson-label {
       display: flex;
@@ -836,7 +856,6 @@
       color: var(--text-muted);
     }
 
-    /* NEW: Start-practice primary button */
     .mic-button {
       padding: 12px 24px;
       border-radius: 999px;
@@ -1053,28 +1072,143 @@
       margin-top: 4px;
     }
 
-    /* Basic responsiveness */
+    /* Sidebar overlay for mobile drawer */
+    .sidebar-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.45);
+      backdrop-filter: blur(2px);
+      z-index: 59;
+    }
+    .sidebar-overlay.visible {
+      display: block;
+    }
+
+    /* Hide global header during live session to reduce clutter */
+    body.live-mode header {
+      display: none;
+    }
+
+    /* ---------- Responsive rules ---------- */
+
+    /* Tablet + down: sidebar becomes drawer */
     @media (max-width: 900px) {
       .dashboard-shell {
         grid-template-columns: 1fr;
       }
-      .sidebar {
-        display: none;
+
+      .btn-hamburger {
+        display: grid;
       }
+
+      .sidebar {
+        position: fixed;
+        top: var(--header-h);
+        left: 0;
+        bottom: 0;
+        width: min(86vw, 320px);
+        transform: translateX(-105%);
+        transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        z-index: 60;
+        box-shadow: 18px 0 40px rgba(0,0,0,0.18);
+        border-right: 1px solid rgba(255,255,255,0.04);
+      }
+
+      .sidebar.open {
+        transform: translateX(0);
+      }
+
       .dashboard-main {
         border-radius: 0;
+        padding: 16px 14px 18px;
       }
     }
 
+    /* Phone sizes */
     @media (max-width: 600px) {
+      :root {
+        --header-h: 56px;
+      }
+
       header {
         padding-inline: 10px;
+        gap: 10px;
       }
+
       .header-center {
         display: none;
       }
+
+      .logo {
+        font-size: 18px;
+      }
+
+      .header-profile-name {
+        font-size: 12px;
+      }
+
+      .header-profile-meta {
+        font-size: 10px;
+      }
+
+      .dashboard-main-inner {
+        gap: 10px;
+      }
+
+      .dashboard-main-header {
+        align-items: center;
+      }
+
+      .subject-chips {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .chip {
+        flex: 1;
+        text-align: center;
+        padding: 7px 10px;
+        font-size: 12px;
+      }
+
+      .grid-header-text {
+        width: 100%;
+        align-items: flex-start;
+        margin-top: 6px;
+      }
+
+      .lesson-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .lesson-card-body {
+        padding: 11px 11px 10px;
+      }
+
+      .lesson-hero {
+        min-height: 86px;
+      }
+
+      .lesson-title {
+        font-size: 16px;
+      }
+
+      .lesson-subtitle {
+        font-size: 12px;
+      }
+
+      .lesson-meta-line {
+        font-size: 11px;
+      }
+
       #questionText {
         font-size: 22px;
+      }
+
+      .live-main {
+        padding: 22px 14px;
       }
     }
 
@@ -1156,40 +1290,6 @@
         font-size: 13px;
       }
     }
-
-    /* Softer, kid-friendlier left rail */
-    .sidebar {
-      background: #0f172a;
-      color: #e5e7eb;
-    }
-
-    .sidebar-section-title {
-      color: #9ca3af;
-    }
-
-    .sidebar-nav-item {
-      color: #e5e7eb;
-    }
-
-    .sidebar-nav-item--active {
-      background: rgba(148, 163, 184, 0.22);
-      color: #ffffff;
-    }
-
-    .sidebar-kid-name {
-      color: #f9fafb;
-    }
-
-    .sidebar-kid-meta {
-      color: #cbd5f5;
-    }
-
-    /* Hide global header during live session to reduce clutter */
-body.live-mode header {
-  display: none;
-}
-
-
   </style>
 </head>
 
@@ -1197,6 +1297,7 @@ body.live-mode header {
   <!-- Global header -->
   <header>
     <div class="header-left">
+      <button id="btnHamburger" class="btn-hamburger" type="button" aria-label="Open menu">☰</button>
       <div class="logo">
         <span>🦉</span>
         <span>Jigyāsa</span>
@@ -1252,6 +1353,9 @@ body.live-mode header {
 
     <!-- LESSON DASHBOARD (SETUP) -->
     <section id="view-setup" class="view">
+      <!-- Mobile overlay -->
+      <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
       <div class="dashboard-shell">
         <!-- Sidebar -->
         <aside class="sidebar">
@@ -1423,6 +1527,61 @@ body.live-mode header {
         const el = $(v);
         if (el) el.classList.toggle("active", v === id);
       });
+
+      // Close sidebar when leaving setup
+      if (id !== "view-setup") closeMobileSidebar();
+    }
+
+    function deriveLessonStatus(lesson) {
+  const totalQs = Number(lesson.total_questions || lesson.estimated_questions || 0);
+  const attempted = Number(lesson.attempted || 0);
+  const correct = Number(lesson.correct || 0);
+
+  // Primary rule based on total questions
+  if (totalQs > 0) {
+    if (correct >= totalQs) return "done";          // 100% score → Done
+    if (attempted > 0 || correct > 0) return "in_progress";
+    return "new";
+  }
+
+  // Fallback if totalQs missing: use completion_pct if backend provides it
+  if (typeof lesson.completion_pct === "number") {
+    if (lesson.completion_pct >= 100) return "done";
+    if (lesson.completion_pct > 0) return "in_progress";
+    return "new";
+  }
+
+  // Final fallback: trust backend status
+  return String(lesson.status || "new").toLowerCase();
+}
+
+
+    /* ---------- Mobile sidebar drawer ---------- */
+    function getSidebarEl() {
+      return document.querySelector("#view-setup .sidebar");
+    }
+
+    function openMobileSidebar() {
+      const sb = getSidebarEl();
+      const ov = $("sidebarOverlay");
+      if (!sb || !ov) return;
+      sb.classList.add("open");
+      ov.classList.add("visible");
+    }
+
+    function closeMobileSidebar() {
+      const sb = getSidebarEl();
+      const ov = $("sidebarOverlay");
+      if (!sb || !ov) return;
+      sb.classList.remove("open");
+      ov.classList.remove("visible");
+    }
+
+    function toggleMobileSidebar() {
+      const sb = getSidebarEl();
+      if (!sb) return;
+      if (sb.classList.contains("open")) closeMobileSidebar();
+      else openMobileSidebar();
     }
 
     /* ---------- Initial boot ---------- */
@@ -1608,6 +1767,7 @@ body.live-mode header {
           }
           renderSidebarTags();
           renderLessonCards();
+          if (window.innerWidth <= 900) closeMobileSidebar();
         };
         container.appendChild(btn);
       });
@@ -1632,7 +1792,8 @@ body.live-mode header {
       const tagFilters = state.tagFilters || [];
 
       const filtered = allLessons.filter((lesson) => {
-        const status = (lesson.status || "new").toLowerCase();
+        const status = deriveLessonStatus(lesson);
+
         const subject = lesson.subject || state.currentSubject;
 
         if (subject !== state.currentSubject) return false;
@@ -1678,7 +1839,8 @@ body.live-mode header {
           '<div class="lesson-empty">No lessons match these filters.</div>';
       } else {
         filtered.forEach((lesson) => {
-          const status = (lesson.status || "new").toLowerCase();
+          const status = deriveLessonStatus(lesson);
+
           const subject = lesson.subject || state.currentSubject || "Math";
           const subjectKey = subject.toLowerCase();
 
@@ -1729,8 +1891,11 @@ body.live-mode header {
           if (status === "new") {
             metaLine = `${totalQs} Qs · ~${mins} min`;
           } else {
-            const denom = attempted || totalQs;
-            metaLine = `${correct}/${denom} correct · ${pct}% complete`;
+            const denom = totalQs || attempted || 0;
+metaLine = denom
+  ? `${correct}/${denom} correct · ${pct}% complete`
+  : `${correct} correct`;
+
           }
 
           const progressHtml =
@@ -1744,10 +1909,18 @@ body.live-mode header {
           </div>`;
 
           const hasArt = !!lesson.image_url;
+
+          /* Auto-hide hero if image 404s */
           const heroHtml = hasArt
             ? `
           <div class="lesson-hero">
-            <img src="${lesson.image_url}" alt="" class="lesson-hero-img" />
+            <img
+              src="${lesson.image_url}"
+              alt=""
+              class="lesson-hero-img"
+              loading="lazy"
+              onerror="this.closest('.lesson-hero') && this.closest('.lesson-hero').classList.add('hidden')"
+            />
           </div>
         `
             : "";
@@ -1815,7 +1988,7 @@ body.live-mode header {
 
       showView("view-live");
       document.body.classList.add("live-mode");
-   
+      closeMobileSidebar();
     }
 
     /* ---------- Search, filters, tags UI wiring ---------- */
@@ -1837,6 +2010,7 @@ body.live-mode header {
             b.classList.toggle("sidebar-nav-item--active", b === btn)
           );
           renderLessonCards();
+          if (window.innerWidth <= 900) closeMobileSidebar();
         });
       });
 
@@ -1858,12 +2032,12 @@ body.live-mode header {
         state.tagFilters = [];
         renderSidebarTags();
         renderLessonCards();
+        if (window.innerWidth <= 900) closeMobileSidebar();
       });
     })();
 
     /* ---------- Live / WebSocket / audio ---------- */
     $("btnMicToggle").onclick = () => {
-      // Only start on click; stop is via End button now.
       if (!state.liveActive) startLive();
     };
 
@@ -1954,7 +2128,6 @@ body.live-mode header {
             })
           );
 
-          // Auto "Hello" so the child doesn't have to
           ws.send(
             JSON.stringify({
               type: "text",
@@ -1985,20 +2158,16 @@ body.live-mode header {
     }
 
     function stopLive(showSummaryFlag) {
-            document.body.classList.remove("live-mode");
+      document.body.classList.remove("live-mode");
       if (!ws && !state.liveActive) return;
 
       state.liveActive = false;
       if (ws) {
-        try {
-          ws.close();
-        } catch (_) {}
+        try { ws.close(); } catch (_) {}
         ws = null;
       }
       if (workletNode) {
-        try {
-          workletNode.disconnect();
-        } catch (_) {}
+        try { workletNode.disconnect(); } catch (_) {}
         workletNode = null;
       }
       if (micStream) {
@@ -2027,7 +2196,21 @@ body.live-mode header {
 
       if (msg.type === "tool_result" && msg.name === "get_question") {
         const q = msg.output || {};
+
         $("questionText").textContent = q.question_text || "Listen…";
+
+        const stage = $("visualStage");
+        stage.innerHTML = "";
+
+        if (q.media && q.media.image && q.media.image.url) {
+          const img = document.createElement("img");
+          img.src = q.media.image.url;
+          img.alt = q.media.image.alt || "";
+          img.style.maxWidth = "220px";
+          img.style.height = "auto";
+          stage.appendChild(img);
+        }
+
         state.stats.total += 1;
         const total = state.currentLesson?.total_questions || state.stats.total;
         renderProgressDots(state.stats.total - 1, total);
@@ -2041,7 +2224,7 @@ body.live-mode header {
           playCorrectSound();
           $("liveStatus").textContent = "Yay! That’s correct!";
         } else {
-          playWrongSound();
+          // Removed wrong-answer sound for a gentler experience
           $("liveStatus").textContent = "Almost! Let’s try together.";
         }
 
@@ -2152,31 +2335,6 @@ body.live-mode header {
       } catch (_) {}
     }
 
-    function playWrongSound() {
-      ensureAudioContext();
-      if (audioCtx.state === "suspended") audioCtx.resume();
-
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = "sawtooth";
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-
-      osc.frequency.setValueAtTime(180, audioCtx.currentTime);
-      osc.frequency.linearRampToValueAtTime(
-        100,
-        audioCtx.currentTime + 0.2
-      );
-      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
-      gain.gain.linearRampToValueAtTime(
-        0.01,
-        audioCtx.currentTime + 0.3
-      );
-
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.32);
-    }
-
     /* Summary button */
     $("btnSummaryHome").onclick = () => {
       showView("view-setup");
@@ -2216,9 +2374,23 @@ body.live-mode header {
     };
 
     $("btnSwitchProfile").onclick = () => {
+      closeMobileSidebar();
       showView("view-picker");
       renderPicker();
     };
+
+    /* Hamburger wiring */
+    $("btnHamburger").onclick = () => {
+      if (!state.user) return;
+      toggleMobileSidebar();
+    };
+    const overlay = $("sidebarOverlay");
+    if (overlay) overlay.onclick = closeMobileSidebar;
+
+    window.addEventListener("resize", () => {
+      if (window.innerWidth > 900) closeMobileSidebar();
+    });
+    
 
     init();
   </script>

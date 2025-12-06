@@ -166,9 +166,21 @@ class ToolRouter:
         # any extra metadata (index_in_lesson, total_in_lesson, has_more, etc.)
         payload.update(extra)
 
+        # list-type extra spec
         if it.get("type") == "list" and it.get("list_spec"):
             payload["list_spec"] = it.get("list_spec")
+
+        # NEW: forward media to the UI (for shapes, pictures, etc.)
+        if it.get("media"):
+            # it["media"] is already a plain dict from JSON / ContentItem
+            payload["media"] = it.get("media")
+
+        # Optional: forward tags if present (can be useful later)
+        if it.get("tags"):
+            payload["tags"] = list(it.get("tags") or [])
+
         return payload
+
 
     # ---- tools ----
     def get_question(
